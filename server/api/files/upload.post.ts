@@ -3,6 +3,45 @@ import { getCfEnv } from '~/lib/cf-env'
 
 type FileInfo = { name: string; filename: string; data: Uint8Array; type: string }
 
+/**
+ * After R2.put resolves, the public hostname (`R2_PUBLIC_BASE_URL`,
+ * usually `pub-*.r2.dev` or a custom domain) can still 404 the new
+ * key for up to a few seconds. The client receives the upload
+ * response and immediately sets `<img src=getImgUrl(/upload/<key>)>`,
+ * which navigates to that public URL — and the browser sees the 404,
+ * which doesn't auto-retry.
+ *
+ * Poll HEAD against the public URL until it's reachable, with short
+ * back-off. Returns once the object is visible OR after the timeout
+ * budget. We return success even on timeout (the upload itself
+ * succeeded — better to let the client retry image load than to
+ * fail the whole flow).
+ */
+async function waitForR2Propagation(
+  publicBase: string | undefined,
+  key: string,
+): Promise<{ visible: boolean; waitedMs: number }> {
+  if (!publicBase) return { visible: true, waitedMs: 0 }
+  const start = Date.now()
+  // Total budget ≈ 6.2s in the worst case (200 + 400 + 800 + 1600 + 3200).
+  const delays = [0, 200, 400, 800, 1600, 3200]
+  for (const d of delays) {
+    if (d > 0) await new Promise((r) => setTimeout(r, d))
+    try {
+      const r = await fetch(`${publicBase}/${key}`, { method: 'HEAD' })
+      if (r.ok) return { visible: true, waitedMs: Date.now() - start }
+      // Anything other than 404 is "weird but reachable" — bail out
+      // and let the client deal with it; we don't want to spin
+      // through a 5xx outage.
+      if (r.status !== 404) return { visible: true, waitedMs: Date.now() - start }
+    } catch {
+      // Fetch threw — DNS hiccup, CORS, whatever. Retry on the
+      // next tick rather than failing.
+    }
+  }
+  return { visible: false, waitedMs: Date.now() - start }
+}
+
 export default defineEventHandler(async (event) => {
   const formData = await readMultipartFormData(event)
   if (!formData || formData.length === 0) {
@@ -26,7 +65,8 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  const uploads = getCfEnv(event).UPLOADS
+  const env = getCfEnv(event)
+  const uploads = env.UPLOADS
   if (!uploads) {
     return {
       success: false,
@@ -47,12 +87,37 @@ export default defineEventHandler(async (event) => {
       httpMetadata: { contentType: file.type || 'application/octet-stream' },
     })
   } catch (e) {
-    console.log('R2 put error:', e)
+    // 之前只 console.log 错误,接口返「上传文件失败」无任何细节,
+    // 排查只能去 worker 日志翻。把真实错误 message 透出来 ——
+    // R2Bucket.put 的 shim 抛 'R2 put 4xx/5xx',直接看 status
+    // 就能定位是 quota / bucket-not-found / proxy-down 哪一种。
+    const reason = e instanceof Error ? e.message : String(e)
+    console.log('R2 put error:', reason)
     return {
       success: false,
-      message: '上传文件失败',
+      message: `上传文件失败: ${reason}`,
       filename: '',
     }
+  }
+
+  // R2 propagation guard — see waitForR2Propagation docstring above
+  // for why this exists. Read base URL from runtimeConfig (public
+  // side has the URL even when the worker env doesn't seed
+  // process.env).
+  const publicBase =
+    (env.R2_PUBLIC_BASE_URL as string | undefined)
+    || (useRuntimeConfig().public?.r2PublicBaseUrl as string | undefined)
+    || ''
+  const propagation = await waitForR2Propagation(
+    publicBase.replace(/\/+$/, ''),
+    key,
+  )
+  if (!propagation.visible) {
+    // Object is in the bucket; the public hostname just hasn't seen
+    // it yet. Log this so we can spot if our timeout is too tight.
+    console.log(
+      `R2 public propagation timeout (${propagation.waitedMs}ms) for ${key}`,
+    )
   }
 
   return {

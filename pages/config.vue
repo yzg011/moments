@@ -19,7 +19,7 @@
         <Label for="favicon-input" class="font-medium" style="align-content: center;">或者输入在线地址:</Label>
         <Input type="text" id="favicon-input" placeholder="或者填入在线地址" autocomplete="off" v-model="state.favicon" style="width: 35%" />
       </div>
-      <img class="max-w-[50px] max-h-[50px]" v-if="state.favicon" :src="state.favicon" alt="" />
+      <img class="max-w-[50px] max-h-[50px]" v-if="state.favicon" :src="getImgUrl(state.favicon)" alt="" />
     </div>
 
     <div class="flex flex-col gap-2 qus-box">
@@ -75,6 +75,42 @@
         </div>
       </div>
       <Input type="text" id="metingApi" placeholder="填写音乐api，例如：https://musicapi.randallanjie.com/" autocomplete="off" v-model="state.metingApi" />
+    </div>
+
+    <div class="flex flex-col gap-2 qus-box">
+      <div class="flex">
+        <Label for="metingVersion" class="font-bold">音乐 API 版本</Label>
+        <div class="tooltip">
+          <span class="tooltip-text">
+            V1 使用传统 /api?server=... 接口；V2 使用 /api/v2 REST 接口，
+            本站会自动转换成播放器兼容格式。已有接口请继续选择 V1。
+          </span>
+          <div class="circle">
+            <span class="exclamation">!</span>
+          </div>
+        </div>
+      </div>
+      <Select id="metingVersion" v-model="state.metingVersion">
+        <option value="v1">V1（传统接口）</option>
+        <option value="v2">V2（REST API）</option>
+      </Select>
+    </div>
+
+    <div class="flex flex-col gap-2 qus-box">
+      <div class="flex">
+        <Label for="metingToken" class="font-bold">音乐API 鉴权 Token</Label>
+        <div class="tooltip">
+          <span class="tooltip-text">
+            填写上游的 METING_TOKEN。V1 会使用兼容 token 参数，V2 会使用
+            Bearer 鉴权；前台请求统一由服务端 /api/music 代理，Token 不会
+            暴露到浏览器。公开 API 可以留空。
+          </span>
+          <div class="circle">
+            <span class="exclamation">!</span>
+          </div>
+        </div>
+      </div>
+      <Input type="password" id="metingToken" placeholder="留空表示音乐API不需要鉴权" autocomplete="new-password" v-model="state.metingToken" />
     </div>
 
     <div class="flex flex-col gap-2 qus-box">
@@ -350,6 +386,7 @@
 
 <script setup lang="ts">
 import { settingsUpdateEvent } from '~/lib/event'
+import { getImgUrl } from '~/lib/utils'
 const token = useCookie('token')
 import { useStorage } from "@vueuse/core";
 import type { User } from '~/lib/types';
@@ -420,6 +457,8 @@ const state = reactive({
   emailNewReplyCommentNotification: '',
   emailNewMentionCommentNotification: '',
   metingApi: '',
+  metingToken: '',
+  metingVersion: 'v1' as 'v1' | 'v2',
   customWeather: false,
   aboutHtml: ''
 })
@@ -470,6 +509,12 @@ state.emailNewCommentNotification = data?.emailNewCommentNotification || ''
 state.emailNewReplyCommentNotification = data?.emailNewReplyCommentNotification || ''
 state.emailNewMentionCommentNotification = data?.emailNewMentionCommentNotification || ''
 state.metingApi = data?.metingApi || ''
+state.metingToken = data?.metingToken || ''
+state.metingVersion = data?.metingVersion === 'v2'
+  || (!data?.metingVersion && /^(https?:\/\/)?music\.rapi\.rest(?:\/|$)/i.test(state.metingApi))
+  || (!data?.metingVersion && /\/api\/v2\/?$/i.test(state.metingApi))
+  ? 'v2'
+  : 'v1'
 state.customWeather = data.customWeather ? data.customWeather == "1" : false
 state.aboutHtml = data?.aboutHtml || ''
 
